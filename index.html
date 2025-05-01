@@ -2,14 +2,49 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Audio Recorder</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Audio Recorder with Responsive Waveform</title>
     <style>
-        body { font-family: Arial, sans-serif; text-align: center; padding: 20px; }
-        button { padding: 10px 20px; margin: 10px; font-size: 16px; }
-        select { padding: 10px; font-size: 16px; }
-        #status { margin-top: 20px; color: green; }
-        .disabled { background-color: grey; cursor: not-allowed; }
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            padding: 20px;
+            margin: 0;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 10px;
+            font-size: 16px;
+        }
+        select {
+            padding: 10px;
+            font-size: 16px;
+        }
+        #status {
+            margin-top: 20px;
+            color: green;
+        }
+        .disabled {
+            background-color: grey;
+            cursor: not-allowed;
+        }
+        #waveform {
+            border: 1px solid #ccc;
+            margin-top: 20px;
+            display: block;
+            width: 100%;
+        }
+        .waveform-container {
+            width: 90%;
+            max-width: 500px;
+            margin: 0 auto;
+        }
+        @media screen and (max-width: 600px) {
+            .waveform-container {
+                width: 95%;
+                max-width: 400px;
+            }
+        }
     </style>
 </head>
 <body>
@@ -24,7 +59,7 @@
             <option value="60">60分</option>
         </select>
         <br>
-        <label for="format">出力形式:</label>
+        <label for="format">输出形式:</label>
         <select id="format">
             <option value="webm">WebM</option>
             <option value="mp3">MP3</option>
@@ -33,6 +68,9 @@
         <br>
         <button id="startRecording" onclick="startRecording()">録音開始</button>
         <button id="stopRecording" onclick="stopRecording()" disabled>録音停止</button>
+    </div>
+    <div class="waveform-container">
+        <canvas id="waveform"></canvas>
     </div>
     <p id="status"></p>
 
@@ -47,11 +85,38 @@
         let hash;
         let audioContext;
         let sourceNode;
+        let analyser;
+        let animationId;
         const statusElement = document.getElementById('status');
         const allowMicButton = document.getElementById('allowMic');
         const recordingControls = document.getElementById('recordingControls');
         const startButton = document.getElementById('startRecording');
         const stopButton = document.getElementById('stopRecording');
+        const canvas = document.getElementById('waveform');
+        const canvasCtx = canvas.getContext('2d');
+        const waveformContainer = document.querySelector('.waveform-container');
+
+        // キャンバスサイズを更新（デバウンス付き）
+        function debounce(func, wait) {
+            let timeout;
+            return function (...args) {
+                clearTimeout(timeout);
+                timeout = setTimeout(() => func.apply(this, args), wait);
+            };
+        }
+
+        function updateCanvasSize() {
+            const containerWidth = waveformContainer.clientWidth;
+            canvas.width = containerWidth;
+            canvas.height = 100; // 高さは固定（必要に応じて変更）
+            console.log(`Canvas size updated: ${canvas.width}x${canvas.height}`);
+        }
+
+        // リサイズと向き変更イベント
+        const debouncedUpdateCanvasSize = debounce(updateCanvasSize, 100);
+        window.addEventListener('resize', debouncedUpdateCanvasSize);
+        window.addEventListener('orientationchange', debouncedUpdateCanvasSize);
+        updateCanvasSize();
 
         async function requestMicPermission() {
             try {
@@ -61,9 +126,11 @@
                     audioBitsPerSecond: 96000
                 });
 
-                // AudioContextを初期化（WAVおよびMP3用）
                 audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 sourceNode = audioContext.createMediaStreamSource(stream);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048;
+                sourceNode.connect(analyser);
 
                 mediaRecorder.ondataavailable = async event => {
                     if (event.data.size > 0) {
@@ -88,7 +155,6 @@
             return Math.random().toString(36).substring(2, 15);
         }
 
-        // WAVファイルのヘッダー生成
         function createWavBuffer(pcmData, sampleRate = 44100) {
             const buffer = new ArrayBuffer(44 + pcmData.length * 2);
             const view = new DataView(buffer);
@@ -99,24 +165,20 @@
                 }
             }
 
-            // RIFFヘッダー
             writeString(view, 0, 'RIFF');
             view.setUint32(4, 36 + pcmData.length * 2, true);
             writeString(view, 8, 'WAVE');
-            // fmtチャンク
             writeString(view, 12, 'fmt ');
             view.setUint16(16, 16, true);
-            view.setUint16(20, 1, true); // PCM
-            view.setUint16(22, 1, true); // モノラル
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
             view.setUint32(24, sampleRate, true);
             view.setUint32(28, sampleRate * 2, true);
-            view.setUint16(32, 2, true); // バイト/サンプル
-            view.setUint16(34, 16, true); // ビット/サンプル
-            // dataチャンク
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
             writeString(view, 36, 'data');
             view.setUint32(40, pcmData.length * 2, true);
 
-            // PCMデータ書き込み
             for (let i = 0; i < pcmData.length; i++) {
                 view.setInt16(44 + i * 2, pcmData[i] * 32767, true);
             }
@@ -124,7 +186,6 @@
             return buffer;
         }
 
-        // WebMをMP3またはWAVに変換
         async function convertToFormat(blob, format) {
             if (format === 'webm') {
                 return blob;
@@ -171,6 +232,43 @@
             URL.revokeObjectURL(url);
         }
 
+        function drawWaveform() {
+            if (!analyser) return;
+
+            const bufferLength = analyser.fftSize;
+            const dataArray = new Float32Array(bufferLength);
+            analyser.getFloatTimeDomainData(dataArray);
+
+            canvasCtx.fillStyle = 'white';
+            canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+            canvasCtx.lineWidth = 2;
+            canvasCtx.strokeStyle = 'blue';
+            canvasCtx.beginPath();
+
+            const sliceWidth = canvas.width / bufferLength;
+            let x = 0;
+
+            for (let i = 0; i < bufferLength; i++) {
+                const v = dataArray[i];
+                const y = (v + 1) * canvas.height / 2;
+
+                if (i === 0) {
+                    canvasCtx.moveTo(x, y);
+                } else {
+                    canvasCtx.lineTo(x, y);
+                }
+
+                x += sliceWidth;
+            }
+
+            canvasCtx.lineTo(canvas.width, canvas.height / 2);
+            canvasCtx.stroke();
+
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                animationId = requestAnimationFrame(drawWaveform);
+            }
+        }
+
         function startRecording() {
             if (!mediaRecorder) {
                 statusElement.textContent = 'マイクが許可されていません。';
@@ -190,29 +288,16 @@
             stopButton.disabled = false;
             statusElement.textContent = '録音中...';
 
-            function saveIntervalData() {
-                if (mediaRecorder.state === 'recording') {
-                    mediaRecorder.requestData();
-                    setTimeout(async () => {
-                        if (audioChunks.length > 0) {
-                            await saveAudio(audioChunks, `${hash}_${fileCount}.${format}`, format);
-                            fileCount++;
-                            audioChunks = [];
-                        }
-                        if (mediaRecorder.state === 'recording') {
-                            intervalId = setTimeout(saveIntervalData, intervalMs);
-                        }
-                    }, 100);
-                }
-            }
-
-            intervalId = setTimeout(saveIntervalData, intervalMs);
+            updateCanvasSize();
+            drawWaveform();
         }
 
         async function stopRecording() {
             if (mediaRecorder && mediaRecorder.state !== 'inactive') {
                 mediaRecorder.stop();
                 clearTimeout(intervalId);
+                cancelAnimationFrame(animationId);
+                canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
                 const format = document.getElementById('format').value;
                 setTimeout(async () => {
                     if (audioChunks.length > 0) {
